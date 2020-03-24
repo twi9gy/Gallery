@@ -1,0 +1,4 @@
+/config/parameters.ini
+/public/upload/methods/db/photogallery.dump
+/public/upload/*
+.idea
