@@ -42,7 +42,9 @@ if (isset($connection)) {
                 $query->bindParam(':avg',$avg);
                 $query->bindParam(':id',$_POST['Id_photo_like']);
                 $query->execute();
-                echo json_encode(array('success' => 1));
+
+                $count_score = count($scores)." шт";
+                echo json_encode(array('success' => 1, 'countScore' => $count_score, 'avg' => $avg));
             } else {
                 echo json_encode(array('success' => 2,'text' => "Вы уже оценили эту фотографию."));
                 exit();

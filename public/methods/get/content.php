@@ -35,10 +35,10 @@ if (isset($connection)) {
                                         <div class="value-score-row"></div>
                                         <div class="value-score-row"></div>
                                         <div class="value-score-row">
-                                            <p class="btn" style="width: 100%" ><?php $scoreObj->get_count($data[$i]->id_photo); ?> шт</p>
+                                            <p class="btn btn-Score" style="width: 100%" ><?php $scoreObj->get_count($data[$i]->id_photo); ?> шт</p>
                                         </div>
                                         <div class="value-score-row">
-                                            <p class="btn" style="width: 100%" ><?php echo $data[$i]->avgscore_photo ?></p>
+                                            <p class="btn btn-Score" style="width: 100%" ><?php echo $data[$i]->avgscore_photo ?></p>
                                         </div>
                                     </div>
                                 <?php } ?>

@@ -57,12 +57,11 @@ if (isset($_POST['Upload'])) {
                 </div>
 
                 <div class="upload-elem">
-                <input type="file" class="upload-input input-fileUpload main-fileUpload" name="Picture" required>
+                    <input type="file" class="upload-input input-fileUpload main-fileUpload" name="Picture" required>
                 </div>
 
                 <div class="upload-elem">
-                    <textarea class="input-field upload-input" style="height: 100%;" name="Desc" required><?php echo @$_POST['Desc']?>
-                    </textarea>
+                    <textarea class="input-field upload-input" style="height: 100%;" name="Desc" required></textarea>
                 </div>
 
                 <div class="upload-elem">

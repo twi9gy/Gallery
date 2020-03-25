@@ -128,9 +128,9 @@
     });
 
     $(document).ready(function() {
-
         $('.likeform').submit(function (e) {
             e.preventDefault();
+            var elem = $(this);
             $.ajax({
                 type: "POST",
                 url: '/methods/post/likephoto.php',
@@ -138,7 +138,10 @@
                 success: function (response) {
                     var jsonData = JSON.parse(response);
                     if (jsonData.success == "1") {
-                        window.location.reload();
+                        var count_score = $(elem).find('.custom-select').find('.value-score-row.count-score')[0];
+                        $(count_score).find('p').text(jsonData.countScore);
+                        var avg_score = $(elem).find('.custom-select').find('.value-score-row.avg-score')[0];
+                        $(avg_score).find('p').text(jsonData.avg);
                     } else {
                         alert(jsonData.text);
                     }
@@ -150,6 +153,7 @@
     $(document).ready(function() {
         $('.delImgform').submit(function (e) {
             e.preventDefault();
+            var elem = $(this);
             $.ajax({
                 type: "POST",
                 url: '../post/delphoto.php',
@@ -157,7 +161,7 @@
                 success: function (response) {
                     var jsonData = JSON.parse(response);
                     if (jsonData.success == "1") {
-                        window.location.reload();
+                        $(elem).parent().parent()[0].style.display = 'none';
                     }
                 }
             });

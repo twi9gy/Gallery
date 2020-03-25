@@ -24,10 +24,10 @@ $scoreObj = new Score();
         <div class="value-score-row">
             <input type="submit" class="btn btn-Score btn-save_like" style="width: 100%;display: none" value="Сохранить">
         </div>
-        <div class="value-score-row">
+        <div class="value-score-row count-score">
             <p class="btn btn-Score" style="width: 100%" ><?php $scoreObj->get_count($data[$i]->id_photo); ?> шт</p>
         </div>
-        <div class="value-score-row">
+        <div class="value-score-row avg-score">
             <p class="btn btn-Score" style="width: 100%" ><?php echo $data[$i]->avgscore_photo ?></p>
         </div>
     </div>
