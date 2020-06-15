@@ -1,0 +1,1323 @@
+--
+-- PostgreSQL database dump
+--
+
+SET statement_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SET check_function_bodies = false;
+SET client_min_messages = warning;
+
+--
+-- Name: plpgsql; Type: EXTENSION; Schema: -; Owner: 
+--
+
+CREATE EXTENSION IF NOT EXISTS plpgsql WITH SCHEMA pg_catalog;
+
+
+--
+-- Name: EXTENSION plpgsql; Type: COMMENT; Schema: -; Owner: 
+--
+
+COMMENT ON EXTENSION plpgsql IS 'PL/pgSQL procedural language';
+
+
+SET search_path = public, pg_catalog;
+
+--
+-- Name: calculate_profit(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION calculate_profit() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+        UPDATE picture
+        SET profit_picture = NEW.price_picture - NEW.costjob_picture
+        WHERE id_picture = NEW.id_picture;
+        RETURN NEW;
+    END;
+$$;
+
+
+ALTER FUNCTION public.calculate_profit() OWNER TO postgres;
+
+--
+-- Name: change_state(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION change_state() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+        number int4;
+        state varchar(100);
+        name varchar(150);
+        res_state varchar(255);
+    BEGIN
+        CREATE TABLE tmp (
+           statement_id int4,
+           picture_name varchar(150),
+           state varchar(100)
+        );
+
+        INSERT INTO tmp (statement_id, picture_name, state)
+        SELECT number_statement, name_sketch, state_statement
+        FROM statement
+        INNER JOIN picture p on statement.id_picture = p.id_picture
+        INNER JOIN sketch s on p.id_sketch = s.id_sketch
+        WHERE number_ordering = NEW.number_ordering;
+
+        WHILE (SELECT COUNT(*) FROM tmp) > 0 LOOP
+
+            number = (SELECT statement_id FROM tmp LIMIT 1);
+            state = (SELECT T.state FROM tmp AS T WHERE statement_id = number);
+
+            IF state = 'Готова' THEN
+                name = (SELECT picture_name FROM tmp WHERE statement_id = number);
+                IF res_state IS NULL OR res_state = '' THEN
+                    res_state = 'Картина ' || name || ' готова';
+                    ELSE
+                    res_state = res_state || ', картина ' || name || ' готова';
+                END IF;
+            END IF;
+
+            DELETE FROM tmp WHERE statement_id = number;
+        END LOOP;
+
+        DROP TABLE tmp;
+
+        IF res_state <> '' THEN
+            UPDATE ordering
+            SET state_ordering = res_state
+            WHERE number_ordering = NEW.number_ordering;
+        END IF;
+
+        RETURN NEW;
+    END
+$$;
+
+
+ALTER FUNCTION public.change_state() OWNER TO postgres;
+
+--
+-- Name: create_bill(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION create_bill() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+        INSERT INTO bill (number_ordering, amount_bill, status_bill, date_bill)
+        VALUES (NEW.number_ordering, NEW.amount_ordering, 'false', (select now()::date));
+        RETURN NEW;
+    END;
+$$;
+
+
+ALTER FUNCTION public.create_bill() OWNER TO postgres;
+
+--
+-- Name: create_statement(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION create_statement() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+        performer integer;
+        pic_order integer;
+        pic integer;
+    BEGIN
+        IF NEW.status_bill = true THEN
+
+            create table full_pic_id (
+              id_pic_order int4
+            );
+
+            INSERT INTO full_pic_id
+            SELECT id_picture_ordering
+            FROM picture_ordering
+            WHERE number_ordering = NEW.number_ordering;
+
+            WHILE (SELECT COUNT(*) FROM full_pic_id) > 0 LOOP
+                performer = (SELECT * FROM search_performer());
+                pic_order = (SELECT id_pic_order FROM full_pic_id LIMIT 1);
+                pic = (SELECT id_picture FROM picture_ordering WHERE id_picture_ordering = pic_order);
+
+                INSERT INTO statement (id_performer, number_ordering, id_picture, date_statement, state_statement)
+                VALUES (performer, NEW.number_ordering, pic, (select now()::date), 'Принята к исполнению');
+
+                DELETE FROM full_pic_id WHERE id_pic_order = pic_order;
+            END LOOP;
+
+            drop table full_pic_id;
+        END IF;
+        RETURN NEW;
+    END;
+$$;
+
+
+ALTER FUNCTION public.create_statement() OWNER TO postgres;
+
+--
+-- Name: search_performer(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION search_performer() RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+        res integer;
+        tmp_performer integer;
+    BEGIN
+
+        CREATE TABLE full_id (
+            id_perform int4 not null,
+            count_statement int4 null
+        );
+        CREATE TABLE full_performer (
+            id_perform int4 not null
+        );
+
+        INSERT INTO full_id (id_perform) SELECT p.id_performer FROM performer as p;
+        INSERT INTO full_performer SELECT p.id_performer FROM performer as p;
+
+        WHILE (SELECT COUNT(*) FROM full_performer) > 0 LOOP
+            tmp_performer = (SELECT id_perform FROM full_performer LIMIT 1);
+            UPDATE full_id as F SET count_statement = (SELECT COUNT(*) FROM statement as S
+            WHERE S.id_performer = tmp_performer and S.state_statement = 'Принята к исполнению')
+            WHERE F.id_perform = tmp_performer;
+            DELETE FROM full_performer WHERE id_perform = tmp_performer;
+        END LOOP;
+
+        res = (
+                SELECT id_perform
+                FROM full_id
+                WHERE count_statement = (
+                    SELECT MIN(count_statement)
+                    FROM full_id)
+                LIMIT 1
+               );
+        DROP TABLE full_id;
+        DROP TABLE full_performer;
+
+        IF res ISNULL THEN
+            RETURN (SELECT id_performer FROM performer LIMIT 1);
+        ELSE
+            RETURN res;
+        END IF;
+    END;
+$$;
+
+
+ALTER FUNCTION public.search_performer() OWNER TO postgres;
+
+--
+-- Name: updatecountsalle(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION updatecountsalle() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+        id int4;
+        sketch_id int4;
+    BEGIN
+        IF NEW.status_bill = true THEN
+            create table full_sketch_id (
+              id_pic_order int4,
+              id_sketch int4
+            );
+
+            INSERT INTO full_sketch_id
+            SELECT PO.id_picture_ordering, P.id_sketch
+            FROM picture_ordering as PO
+            INNER JOIN picture AS P ON PO.id_picture = P.id_picture
+            WHERE PO.number_ordering = NEW.number_ordering;
+
+            WHILE (SELECT COUNT(*) FROM full_sketch_id) > 0 LOOP
+
+                id = (select id_pic_order from full_sketch_id LIMIT 1);
+                sketch_id = (select id_sketch from full_sketch_id WHERE id_pic_order = id);
+
+                Update sketch
+                SET countsales_sketch = countsales_sketch + 1
+                WHERE sketch.id_sketch = sketch_id;
+
+                DELETE FROM full_sketch_id WHERE id_pic_order = id;
+
+            END LOOP;
+
+            DROP TABLE full_sketch_id;
+        END IF;
+        RETURN NEW;
+    END;
+$$;
+
+
+ALTER FUNCTION public.updatecountsalle() OWNER TO postgres;
+
+SET default_tablespace = '';
+
+SET default_with_oids = false;
+
+--
+-- Name: bill; Type: TABLE; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE bill (
+    number_bill integer NOT NULL,
+    number_ordering integer NOT NULL,
+    amount_bill money NOT NULL,
+    status_bill boolean NOT NULL,
+    date_bill date NOT NULL
+);
+
+
+ALTER TABLE public.bill OWNER TO postgres;
+
+--
+-- Name: bill_number_bill_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE bill_number_bill_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.bill_number_bill_seq OWNER TO postgres;
+
+--
+-- Name: bill_number_bill_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE bill_number_bill_seq OWNED BY bill.number_bill;
+
+
+--
+-- Name: buyer; Type: TABLE; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE buyer (
+    id_buyer integer NOT NULL,
+    id_user integer NOT NULL,
+    passport_buyer character varying(400)
+);
+
+
+ALTER TABLE public.buyer OWNER TO postgres;
+
+--
+-- Name: buyer_id_buyer_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE buyer_id_buyer_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.buyer_id_buyer_seq OWNER TO postgres;
+
+--
+-- Name: buyer_id_buyer_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE buyer_id_buyer_seq OWNED BY buyer.id_buyer;
+
+
+--
+-- Name: manager; Type: TABLE; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE manager (
+    id_manager integer NOT NULL,
+    id_user integer NOT NULL
+);
+
+
+ALTER TABLE public.manager OWNER TO postgres;
+
+--
+-- Name: manager_id_manager_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE manager_id_manager_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.manager_id_manager_seq OWNER TO postgres;
+
+--
+-- Name: manager_id_manager_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE manager_id_manager_seq OWNED BY manager.id_manager;
+
+
+--
+-- Name: ordering; Type: TABLE; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE ordering (
+    number_ordering integer NOT NULL,
+    id_buyer integer,
+    id_manager integer,
+    date_ordering date NOT NULL,
+    state_ordering character varying(200) NOT NULL,
+    timeexecution_ordering integer NOT NULL,
+    amount_ordering money NOT NULL
+);
+
+
+ALTER TABLE public.ordering OWNER TO postgres;
+
+--
+-- Name: users; Type: TABLE; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE users (
+    id_user integer NOT NULL,
+    login_user character varying(150) NOT NULL,
+    password_user character varying(250) NOT NULL,
+    role_user character varying(100) NOT NULL,
+    email_user character varying(100) NOT NULL,
+    fullname_user character varying(200),
+    phone_user character varying(30)
+);
+
+
+ALTER TABLE public.users OWNER TO postgres;
+
+--
+-- Name: manager_view; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW manager_view AS
+    SELECT u.fullname_user, count(*) AS countsale, date_part('year'::text, o.date_ordering) AS year, date_part('month'::text, o.date_ordering) AS month FROM ((ordering o JOIN manager m ON ((o.id_manager = m.id_manager))) JOIN users u ON ((m.id_user = u.id_user))) GROUP BY o.date_ordering, u.fullname_user;
+
+
+ALTER TABLE public.manager_view OWNER TO postgres;
+
+--
+-- Name: ordering_number_ordering_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE ordering_number_ordering_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.ordering_number_ordering_seq OWNER TO postgres;
+
+--
+-- Name: ordering_number_ordering_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE ordering_number_ordering_seq OWNED BY ordering.number_ordering;
+
+
+--
+-- Name: performer; Type: TABLE; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE performer (
+    id_performer integer NOT NULL,
+    id_user integer NOT NULL
+);
+
+
+ALTER TABLE public.performer OWNER TO postgres;
+
+--
+-- Name: performer_id_performer_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE performer_id_performer_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.performer_id_performer_seq OWNER TO postgres;
+
+--
+-- Name: performer_id_performer_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE performer_id_performer_seq OWNED BY performer.id_performer;
+
+
+--
+-- Name: picture; Type: TABLE; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE picture (
+    id_picture integer NOT NULL,
+    id_sketch integer NOT NULL,
+    size_picture character varying(100) NOT NULL,
+    price_picture money NOT NULL,
+    costjob_picture money NOT NULL,
+    profit_picture money
+);
+
+
+ALTER TABLE public.picture OWNER TO postgres;
+
+--
+-- Name: picture_id_picture_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE picture_id_picture_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.picture_id_picture_seq OWNER TO postgres;
+
+--
+-- Name: picture_id_picture_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE picture_id_picture_seq OWNED BY picture.id_picture;
+
+
+--
+-- Name: picture_ordering; Type: TABLE; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE picture_ordering (
+    id_picture_ordering integer NOT NULL,
+    id_picture integer NOT NULL,
+    number_ordering integer NOT NULL
+);
+
+
+ALTER TABLE public.picture_ordering OWNER TO postgres;
+
+--
+-- Name: picture_ordering_id_picture_ordering_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE picture_ordering_id_picture_ordering_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.picture_ordering_id_picture_ordering_seq OWNER TO postgres;
+
+--
+-- Name: picture_ordering_id_picture_ordering_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE picture_ordering_id_picture_ordering_seq OWNED BY picture_ordering.id_picture_ordering;
+
+
+--
+-- Name: profit_view; Type: VIEW; Schema: public; Owner: postgres
+--
+
+CREATE VIEW profit_view AS
+    SELECT date_part('year'::text, o.date_ordering) AS year, date_part('month'::text, o.date_ordering) AS month, sum(p.price_picture) AS sumprice FROM ((ordering o JOIN picture_ordering po ON ((o.number_ordering = po.number_ordering))) JOIN picture p ON ((po.id_picture = p.id_picture))) GROUP BY o.date_ordering;
+
+
+ALTER TABLE public.profit_view OWNER TO postgres;
+
+--
+-- Name: sketch; Type: TABLE; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE sketch (
+    id_sketch integer NOT NULL,
+    name_sketch character varying(100) NOT NULL,
+    description_sketch text NOT NULL,
+    version_sketch character varying(300) NOT NULL,
+    countsales_sketch integer DEFAULT 0 NOT NULL,
+    url_sketch character varying(250) NOT NULL,
+    author_sketch character varying(150) NOT NULL
+);
+
+
+ALTER TABLE public.sketch OWNER TO postgres;
+
+--
+-- Name: sketch_id_sketch_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE sketch_id_sketch_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.sketch_id_sketch_seq OWNER TO postgres;
+
+--
+-- Name: sketch_id_sketch_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE sketch_id_sketch_seq OWNED BY sketch.id_sketch;
+
+
+--
+-- Name: statement; Type: TABLE; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE TABLE statement (
+    number_statement integer NOT NULL,
+    id_performer integer NOT NULL,
+    number_ordering integer NOT NULL,
+    id_picture integer NOT NULL,
+    date_statement date NOT NULL,
+    state_statement character varying(100) NOT NULL,
+    readydate_statement date
+);
+
+
+ALTER TABLE public.statement OWNER TO postgres;
+
+--
+-- Name: statement_number_statement_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE statement_number_statement_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.statement_number_statement_seq OWNER TO postgres;
+
+--
+-- Name: statement_number_statement_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE statement_number_statement_seq OWNED BY statement.number_statement;
+
+
+--
+-- Name: users_id_user_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE users_id_user_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER TABLE public.users_id_user_seq OWNER TO postgres;
+
+--
+-- Name: users_id_user_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE users_id_user_seq OWNED BY users.id_user;
+
+
+--
+-- Name: number_bill; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY bill ALTER COLUMN number_bill SET DEFAULT nextval('bill_number_bill_seq'::regclass);
+
+
+--
+-- Name: id_buyer; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY buyer ALTER COLUMN id_buyer SET DEFAULT nextval('buyer_id_buyer_seq'::regclass);
+
+
+--
+-- Name: id_manager; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY manager ALTER COLUMN id_manager SET DEFAULT nextval('manager_id_manager_seq'::regclass);
+
+
+--
+-- Name: number_ordering; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ordering ALTER COLUMN number_ordering SET DEFAULT nextval('ordering_number_ordering_seq'::regclass);
+
+
+--
+-- Name: id_performer; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY performer ALTER COLUMN id_performer SET DEFAULT nextval('performer_id_performer_seq'::regclass);
+
+
+--
+-- Name: id_picture; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY picture ALTER COLUMN id_picture SET DEFAULT nextval('picture_id_picture_seq'::regclass);
+
+
+--
+-- Name: id_picture_ordering; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY picture_ordering ALTER COLUMN id_picture_ordering SET DEFAULT nextval('picture_ordering_id_picture_ordering_seq'::regclass);
+
+
+--
+-- Name: id_sketch; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY sketch ALTER COLUMN id_sketch SET DEFAULT nextval('sketch_id_sketch_seq'::regclass);
+
+
+--
+-- Name: number_statement; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY statement ALTER COLUMN number_statement SET DEFAULT nextval('statement_number_statement_seq'::regclass);
+
+
+--
+-- Name: id_user; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY users ALTER COLUMN id_user SET DEFAULT nextval('users_id_user_seq'::regclass);
+
+
+--
+-- Data for Name: bill; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY bill (number_bill, number_ordering, amount_bill, status_bill, date_bill) FROM stdin;
+45	47	4 500,00 ?	t	2020-06-01
+46	48	1 500,00 ?	f	2020-06-01
+47	49	3 000,00 ?	t	2020-06-01
+48	50	3 000,00 ?	t	2020-06-01
+\.
+
+
+--
+-- Name: bill_number_bill_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('bill_number_bill_seq', 48, true);
+
+
+--
+-- Data for Name: buyer; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY buyer (id_buyer, id_user, passport_buyer) FROM stdin;
+5	2	1234
+-1	-1	deleted
+\.
+
+
+--
+-- Name: buyer_id_buyer_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('buyer_id_buyer_seq', 9, true);
+
+
+--
+-- Data for Name: manager; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY manager (id_manager, id_user) FROM stdin;
+4	4
+5	8
+6	7
+-1	-1
+\.
+
+
+--
+-- Name: manager_id_manager_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('manager_id_manager_seq', 7, true);
+
+
+--
+-- Data for Name: ordering; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY ordering (number_ordering, id_buyer, id_manager, date_ordering, state_ordering, timeexecution_ordering, amount_ordering) FROM stdin;
+48	5	\N	2020-06-01	Оформлен	14	1 500,00 ?
+49	5	\N	2020-06-01	Принят к исполнению	14	3 000,00 ?
+50	\N	4	2020-06-01	Принят к исполнению	14	3 000,00 ?
+47	\N	4	2020-06-01	Картина Луна готова	14	4 500,00 ?
+\.
+
+
+--
+-- Name: ordering_number_ordering_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('ordering_number_ordering_seq', 50, true);
+
+
+--
+-- Data for Name: performer; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY performer (id_performer, id_user) FROM stdin;
+2	5
+6	3
+-1	-1
+\.
+
+
+--
+-- Name: performer_id_performer_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('performer_id_performer_seq', 7, true);
+
+
+--
+-- Data for Name: picture; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY picture (id_picture, id_sketch, size_picture, price_picture, costjob_picture, profit_picture) FROM stdin;
+33	11	270x400	3 200,00 ?	1 800,00 ?	1 400,00 ?
+34	12	320x380	3 150,00 ?	2 560,00 ?	590,00 ?
+35	13	520x640	5 300,00 ?	3 950,00 ?	1 350,00 ?
+36	14	490x570	4 970,00 ?	3 820,00 ?	1 150,00 ?
+14	3	100x200	2 500,00 ?	1 750,00 ?	750,00 ?
+15	3	150x300	3 000,00 ?	2 000,00 ?	1 000,00 ?
+16	5	400х600	3 000,00 ?	2 000,00 ?	1 000,00 ?
+4	1	100x200	2 000,00 ?	1 000,00 ?	1 000,00 ?
+5	1	40x60	1 500,00 ?	750,00 ?	750,00 ?
+28	6	150x300	4 000,00 ?	2 500,00 ?	1 500,00 ?
+29	7	150x300	3 300,00 ?	1 750,00 ?	1 550,00 ?
+30	8	100х200	2 100,00 ?	1 530,00 ?	570,00 ?
+31	9	250x300	1 900,00 ?	1 200,00 ?	700,00 ?
+32	10	350x450	4 300,00 ?	2 700,00 ?	1 600,00 ?
+\.
+
+
+--
+-- Name: picture_id_picture_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('picture_id_picture_seq', 36, true);
+
+
+--
+-- Data for Name: picture_ordering; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY picture_ordering (id_picture_ordering, id_picture, number_ordering) FROM stdin;
+87	5	47
+88	15	47
+89	5	48
+90	16	49
+91	15	50
+\.
+
+
+--
+-- Name: picture_ordering_id_picture_ordering_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('picture_ordering_id_picture_ordering_seq', 91, true);
+
+
+--
+-- Data for Name: sketch; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY sketch (id_sketch, name_sketch, description_sketch, version_sketch, countsales_sketch, url_sketch, author_sketch) FROM stdin;
+3	Утро в горах	Несомненно, художники-романтики привнесли в живопись ещё больше красоты, эмоций, свободы и чувства. В этом можно убедиться, взглянув на картину немецкого художника, ярчайшего представителя романтического направления, Каспара Давида Фридриха «Утро в горах».     Живописец переносит зрителя на некую номинальную высокую точку, откуда открывается восхитительные виды горных вершин. Покатые пики гор будто морские волны, застывшие во времени, застелены мягкими облаками предрассветного густого тумана. Фридрих сохраняет реалистичность времени и места. Именно так должен ощущать себя человек в тумане - у ног его тумана как раз не видно, и нужно взглянуть чуть подальше, чтобы заметить это атмосферное явление. Более того, очень правдоподобно мастер изобразил туман в горах – словно с пологих краёв скатывается он вниз, заполняя всё пространство у подножья.     Зыбкий момент воспроизведён на полотне – вот-вот поднимется солнце, и можно заметить отсвет его лучей у горизонта за центральной горной вершиной. Небо с его тончайшими                                    	Масло	6	../../../upload/11.jpg	Вадим С.
+1	Луна	Автор картины уже болен, плохо себя чувствует. Он признан обществом, собратьями по цеху, но находится в натянутых, холодных отношениях с лучшим другом – писателем А.П. Чеховым. У него болит сердце и ходит ещё молодой (ему нет и 40) Исаак Ильич, опираясь на палку. Оттого и его полотно меланхоличное, хмурое и какое-то одинокое.\r\n\r\n   Картина визуально разделена на две половины - бескрайнее небо с одиноким кружком луны и безграничная водная гладь, отражающая всё то же небо, и всю ту же луну. Ни души, ни дуновения ветерка, лишь чуть заметная рябь на воде.\r\n\r\n   Диссонансом голубой палитре выступают густо-оранжевые деревья, жёлтая трава по берегам, тёмная стать высоких сосен. Композиционно всё гармонично и точно выверено. Нагруженная правая сторона с лихвой сбалансирована двумя одинокими, тонкими, почти голыми деревцами, этим самым ровно распределяя внимание зрителя по полотну. Эта филигранность и тонкость так свойственна Левитану.                                     	Кисть	7	../../../upload/2.jpg	Вадим С.
+7	Звездное небо	 Нет на свете художника, которого не притягивало бы звездное небо. Автор не раз обращался к этому романтичному и загадочному объекту.     Мастеру было тесно в рамках реального мира. Он посчитал, что именно его фантазия, игра воображения необходимы для более полного изображения. Известно, что к моменту создания картины, автор проходил очередной курс лечения, ему разрешали работать только в случае улучшения состояния. Художник был лишен возможности творить на натуре. Многие работы в этот период (в том числе и "Звездную ночь") он создал по памяти.	Масло	0	../../../upload/1.jpg	Винсент В.Г.
+8	Космос	Космизм — особое явление первой половины XX века. Основоположником русского космизма считается Николай Фёдоров, создавший план так называемого «общего дела». Согласно представлениям Фёдорова, человечеству надо объединить все усилия для того, чтобы достигнуть бессмертия и осваивать космос.  Конечно, можно сказать, что идея бессмертия восходит к православной традиции, но есть существенное различие. Прежде всего, в том, что Фёдоров говорил о бессмертии не только души, но и тела. Причём «бессмертные» должны были ещё и озаботиться тем, чтобы оживить всех, кто жил когда-либо ранее. Поскольку подобное рано или поздно привело бы к перенаселению Земли, Фёдоров предполагал, что к тому моменту люди уже достигнут такого уровня знаний, что им будет под силу переселиться на другие планеты, хотя в то время, естественно, никакого технического оснащения для полётов в космос ещё не было.	Кисть	0	../../../upload/3.jpg	Рерих Н.А.
+5	Лед	 Картина наполнена звучанием весны. Это одна из самых радостных, весенних работ художника. Полотно написано оптимистично и вдохновенно. Всё залито первыми лучами солнца. На берегу виднеются островки нерастаявшего снега. Река уже освободилась от ледяных оков. Голубой простор пленит лучезарным светом.     Местные жители пришли на берег реки, чтобы полюбоваться весенним торжеством природы. Они заняты своими делами. Люди находятся в единстве с окружающим миром. Через пейзаж зрителю передаются их чувства, эмоции, мысли. От полотна веет настоящей весной. Люди ждут её пробуждения. Они охвачены ожиданием светлого пира земной гармонии в сочетании с предстоящим расцветом земли.	Масло	5	../../../upload/4.jpg	Абрам Е.А.
+6	Вечер 	В 1877 году на 5-ой выставке Товарищества передвижников юный, начинающий художник Исаак Левитан на суд публики представил две свои работы: «Солнечный день. Весна» и «Вечер». Разумеется, картины экспонировались не в основном зале, так как Левитан был ещё совсем неизвестен, а на специальном ученическом отделении, носившем пятый порядковый номер.     В итоге, «Вечер» вместе с «Солнечным днём» стали самыми ранними работами Левитана из сохранившихся. Полотна были сразу отмечены критиками, а Исаак Ильич удостоен малой серебряной медалью.	Кисть	0	../../../upload/5.jpg	Исаак И.Л.
+10	Небо	Исследователь творчества Кандинского Мишель Кониль-Лакост писал о полотне «Синее небо» так: «Графическая строгость на этой картине уступает барочной множественности мотивов, они выглядят так, словно потеряли всякую связь со структурой, которая была определяющей в пространстве и долгое время была понятной и заметной только художнику, а его единственным долгом было сделать ее видимой для всех остальных. Странные плавающие фигуры хочется назвать существами. Художник не делает ничего, чтобы смягчить этот причудливый, гротескный эффект. С другой стороны, чем более абсурдны эти фигуры, тем более очевидно его стремление проработать их в мельчайших деталях, тем более изысканны их формы, тем ярче цвета».	Кисть	0	../../../upload/10.jpg	Кандийский А.В
+11	Лес	 одно из ярких произведений кисти И. Шишкина. Шедевр пропитан восхищением природы растительного и животного мира. На картине все смотрится очень гармонично. Зеленые, голубые и ярко-желтые тона создают эффект едва проснувшейся от сна природы. На заднем плане можно увидеть яркие золотистые оттенки – это намек на пробивающиеся лучи солнца. Они придают картине торжественную атмосферу. По земле еще клубится туман, изображенный довольно реалистично, и, если сосредоточиться на этой детали шедевра, то можно прочувствовать утреннюю прохладу.     Картина "Утро в сосновом лесу" - очень яркая и настолько реалистичная, что кажется, будто бы это не шедевр кисти, а снимок лесного пейзажа. Каждая деталь картины изображена профессионально, с любовью и трепетом. На переднем плане мы видим поваленную с корнем сосну, на которую взбираются медведи. Они резвятся, вызывая положительные эмоции. Для них утро нового дня является настоящим праздником. Медвежата так добры и безобидны, словно приручены. Кажется, что они не способны на жестокость и совсем не хищны, несмотря на свою животную природу.	Масло	0	../../../upload/13.jpg	Шишкин В.С.
+12	Море	Н. Дубовской – один из тех художников, которые сделали себе имя пейзажами. Правда, романтический подход, прослеживающийся у него поначалу, со временем эволюционировал в прозрачные границы между реальным миром и сном-миражом наяву. Основными характеристиками творчества Н. Дубовского исследователи называют умиротворенное состояние окружающей природы, с легким налетом национально-романтического оттенка и верность традициям творчества передвижников.  Этот человек был по-настоящему влюблен в искусство, причем настолько, что рисуя этюд с натуры, когда-то опоздал на собственное венчание. Расстроенная невеста все же дождалась своего будущего мужа, и, всегда принимая его талант, сделала невозможное. Именно благодаря ей полотно «Притихло» оказалось на выставке передвижников, где его тут же купил сам император.	Кисть	0	../../../upload/14.jpg	Дубовский Н.Л.
+13	Эйфелева башня	Если вы думаете, что Жорж Сёра написал здесь главную французскую достопримечательность и самый посещаемый туристический объект, вы сильно ошибаетесь. В 1889 году художник взялся написать самое спорное и скандальное инженерное сооружение, возведенное посреди Парижа как раз в этом году к открытию Всемирной выставки. Это было то самое сооружение, против которого выступили практически все известные писатели и художники, пытаясь убедить муниципалитет в том, что посреди города прямо сейчас совершается акт вандализма и эта громадная, уродливая, совершенно бесполезная заводская труба исказит архитектуру Парижа и уничтожит вид из любого окна. Помните хрестоматийный анекдот, что Ги де Мопассан обедал ежедневно в кафе на первом уровне башни. Когда его спрашивали, зачем, он отвечал: «Это единственное место в Париже, из которого ее не видно». 	Кисть	0	../../../upload/17.jpg	Жорж С
+9	Река	Левитан — один из главный художников русского пейзажа. Он тонко чувствовал природу и умел мастерски передавать на своих картинах ее различные состояния, создавая тем самым «пейзаж настроения».  Любимым временем года русского живописца всегда была осень, в эту пору он написал невообразимое количество полотен: не считая этюдов, их около 100. Одна из знаменитых осенних картин, которую Левитан завершил в 1899 году – "Река".                                    	Масло	0	../../../upload/7.jpg	Исаак Л.Д.
+14	Космическое	  Картина с светящимися элементами заполнит помещение уютом и днем, и ночью. Благодаря необыкновенности картины, можно увидеть много восторженных взглядов. На картине изображено звездное небо и светящаяся полярная звезда.  Характеристика Размер картины: ширина 30 см, высота 40 см, толщина 1,8 см., Светящиеся лампочки: на картине 1 LЕD лампа, с УФ защитой,2 ААА (пальчиковые) батарейки - в комплект не входят. Переключатель лампочек находится сбоку.	Масло	0	../../../upload/15.jpg	Линдер А.Р.
+\.
+
+
+--
+-- Name: sketch_id_sketch_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('sketch_id_sketch_seq', 14, true);
+
+
+--
+-- Data for Name: statement; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY statement (number_statement, id_performer, number_ordering, id_picture, date_statement, state_statement, readydate_statement) FROM stdin;
+37	-1	47	15	2020-06-01	Принята к исполнению	\N
+36	2	47	5	2020-06-01	Готова	2020-06-11
+38	2	49	16	2020-06-01	Принята к исполнению	\N
+39	6	50	15	2020-06-01	Принята к исполнению	\N
+\.
+
+
+--
+-- Name: statement_number_statement_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('statement_number_statement_seq', 39, true);
+
+
+--
+-- Data for Name: users; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY users (id_user, login_user, password_user, role_user, email_user, fullname_user, phone_user) FROM stdin;
+1	admin	$2y$10$kZYZSGCuMQQ95J3R0eOxy.W938m5qt6zNUB8IbQs9j3IM0mxi6HSO	admin	admin@mail.ru	\N	\N
+4	manager	$2y$10$dmSD5I57/Qt3VeFLB5FAhesB3FzoIGpTA4Nf450VhVMDBijtnFlmu	manager	manager@mail.ru	Самойлов Вадим Дмитриевич	89042980741
+3	performer	$2y$10$AIP9N5zfSilz97B6szlIouJm.lpVuxcQvSrJ27ohrC8GFRX2/KmBS	performer	performer@mail.ru	\N	\N
+8	pila	$2y$10$ZPXc4BQRoJly3k.TDSxKrOc3V7WwMt9fPn13E0BKSRCBvB3HN6q8O	manager	pila@mail.ru	Александр Екимов Олегович	89059848512
+2	test	$2y$10$x5Z10dESRcWKHYnn8VAMg.1Inssp8wNMo5nKHBRixPvyaKc63MeQC	buyer	test@mail.ru	Самойлов Вадим Дмитриевич	89042980743
+7	dima	$2y$10$6BSUXsj/5wNYwhs0K30P7OUHDDLc/j2ECBH1pIPZeBYWZu9Ls8ooO	manager	dima@mail.ru	\N	\N
+5	vadim	$2y$10$y7GSBuAEr30RPzIu5L7eNu0iNiEmtXMowJN0visx538B/4CzbXSma	performer	vadim@mail.ru	\N	\N
+-1	deleted	$2y$10$y7GSBuAEr30RPzIu5L7eNu0iNiEmtXMowJN0visx538B/4CzbXSma	deleted	deleted	\N	\N
+\.
+
+
+--
+-- Name: users_id_user_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('users_id_user_seq', 8, true);
+
+
+--
+-- Name: pk_bill; Type: CONSTRAINT; Schema: public; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY bill
+    ADD CONSTRAINT pk_bill PRIMARY KEY (number_bill);
+
+
+--
+-- Name: pk_buyer; Type: CONSTRAINT; Schema: public; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY buyer
+    ADD CONSTRAINT pk_buyer PRIMARY KEY (id_buyer);
+
+
+--
+-- Name: pk_manager; Type: CONSTRAINT; Schema: public; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY manager
+    ADD CONSTRAINT pk_manager PRIMARY KEY (id_manager);
+
+
+--
+-- Name: pk_ordering; Type: CONSTRAINT; Schema: public; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY ordering
+    ADD CONSTRAINT pk_ordering PRIMARY KEY (number_ordering);
+
+
+--
+-- Name: pk_performer; Type: CONSTRAINT; Schema: public; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY performer
+    ADD CONSTRAINT pk_performer PRIMARY KEY (id_performer);
+
+
+--
+-- Name: pk_picture; Type: CONSTRAINT; Schema: public; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY picture
+    ADD CONSTRAINT pk_picture PRIMARY KEY (id_picture);
+
+
+--
+-- Name: pk_picture_ordering; Type: CONSTRAINT; Schema: public; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY picture_ordering
+    ADD CONSTRAINT pk_picture_ordering PRIMARY KEY (id_picture_ordering);
+
+
+--
+-- Name: pk_sketch; Type: CONSTRAINT; Schema: public; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY sketch
+    ADD CONSTRAINT pk_sketch PRIMARY KEY (id_sketch);
+
+
+--
+-- Name: pk_statement; Type: CONSTRAINT; Schema: public; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY statement
+    ADD CONSTRAINT pk_statement PRIMARY KEY (number_statement);
+
+
+--
+-- Name: pk_users; Type: CONSTRAINT; Schema: public; Owner: postgres; Tablespace: 
+--
+
+ALTER TABLE ONLY users
+    ADD CONSTRAINT pk_users PRIMARY KEY (id_user);
+
+
+--
+-- Name: Is-a1_FK; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX "Is-a1_FK" ON buyer USING btree (id_user);
+
+
+--
+-- Name: Is-a2_FK; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX "Is-a2_FK" ON performer USING btree (id_user);
+
+
+--
+-- Name: Is-a3_FK; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX "Is-a3_FK" ON manager USING btree (id_user);
+
+
+--
+-- Name: bill_pk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE UNIQUE INDEX bill_pk ON bill USING btree (number_bill);
+
+
+--
+-- Name: buyer_pk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE UNIQUE INDEX buyer_pk ON buyer USING btree (id_buyer);
+
+
+--
+-- Name: comein_fk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX comein_fk ON picture USING btree (id_sketch);
+
+
+--
+-- Name: date_bill; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX date_bill ON bill USING btree (date_bill);
+
+
+--
+-- Name: date_ordering; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX date_ordering ON ordering USING btree (date_ordering);
+
+
+--
+-- Name: date_statement; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX date_statement ON statement USING btree (date_statement);
+
+
+--
+-- Name: distributed_fk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX distributed_fk ON statement USING btree (number_ordering);
+
+
+--
+-- Name: does_fk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX does_fk ON ordering USING btree (id_buyer);
+
+
+--
+-- Name: includes2_fk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX includes2_fk ON picture_ordering USING btree (number_ordering);
+
+
+--
+-- Name: includes_fk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX includes_fk ON picture_ordering USING btree (id_picture);
+
+
+--
+-- Name: includes_pk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE UNIQUE INDEX includes_pk ON picture_ordering USING btree (id_picture_ordering);
+
+
+--
+-- Name: keep_track_fk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX keep_track_fk ON ordering USING btree (id_manager);
+
+
+--
+-- Name: manager_pk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE UNIQUE INDEX manager_pk ON manager USING btree (id_manager);
+
+
+--
+-- Name: ordering_pk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE UNIQUE INDEX ordering_pk ON ordering USING btree (number_ordering);
+
+
+--
+-- Name: payment_fk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX payment_fk ON bill USING btree (number_ordering);
+
+
+--
+-- Name: performer_pk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE UNIQUE INDEX performer_pk ON performer USING btree (id_performer);
+
+
+--
+-- Name: picture_pk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE UNIQUE INDEX picture_pk ON picture USING btree (id_picture);
+
+
+--
+-- Name: realizes_fk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX realizes_fk ON statement USING btree (id_performer);
+
+
+--
+-- Name: sketch_pk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE UNIQUE INDEX sketch_pk ON sketch USING btree (id_sketch);
+
+
+--
+-- Name: statement_pk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE UNIQUE INDEX statement_pk ON statement USING btree (number_statement);
+
+
+--
+-- Name: turning_fk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE INDEX turning_fk ON statement USING btree (id_picture);
+
+
+--
+-- Name: users_pk; Type: INDEX; Schema: public; Owner: postgres; Tablespace: 
+--
+
+CREATE UNIQUE INDEX users_pk ON users USING btree (id_user);
+
+
+--
+-- Name: insertbill; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER insertbill AFTER INSERT ON ordering FOR EACH ROW EXECUTE PROCEDURE create_bill();
+
+
+--
+-- Name: insertpicture_createstatement; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER insertpicture_createstatement AFTER UPDATE ON bill FOR EACH ROW EXECUTE PROCEDURE create_statement();
+
+
+--
+-- Name: picture_calculate_profit; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER picture_calculate_profit AFTER INSERT ON picture FOR EACH ROW EXECUTE PROCEDURE calculate_profit();
+
+
+--
+-- Name: update_countsale; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER update_countsale AFTER UPDATE ON bill FOR EACH ROW EXECUTE PROCEDURE updatecountsalle();
+
+
+--
+-- Name: updatestatement; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER updatestatement AFTER UPDATE ON statement FOR EACH ROW EXECUTE PROCEDURE change_state();
+
+
+--
+-- Name: FK_BUYER_IS-A1_USERS; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY buyer
+    ADD CONSTRAINT "FK_BUYER_IS-A1_USERS" FOREIGN KEY (id_user) REFERENCES users(id_user) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: FK_MANAGER_IS-A3_USERS; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY manager
+    ADD CONSTRAINT "FK_MANAGER_IS-A3_USERS" FOREIGN KEY (id_user) REFERENCES users(id_user) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: FK_PERFORME_IS-A2_USERS; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY performer
+    ADD CONSTRAINT "FK_PERFORME_IS-A2_USERS" FOREIGN KEY (id_user) REFERENCES users(id_user) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: fk_bill_payment_ordering; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY bill
+    ADD CONSTRAINT fk_bill_payment_ordering FOREIGN KEY (number_ordering) REFERENCES ordering(number_ordering) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: fk_ordering_does_buyer; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ordering
+    ADD CONSTRAINT fk_ordering_does_buyer FOREIGN KEY (id_buyer) REFERENCES buyer(id_buyer) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: fk_ordering_keep_trac_manager; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY ordering
+    ADD CONSTRAINT fk_ordering_keep_trac_manager FOREIGN KEY (id_manager) REFERENCES manager(id_manager) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: fk_picture__includes2_ordering; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY picture_ordering
+    ADD CONSTRAINT fk_picture__includes2_ordering FOREIGN KEY (number_ordering) REFERENCES ordering(number_ordering) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: fk_picture__includes_picture; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY picture_ordering
+    ADD CONSTRAINT fk_picture__includes_picture FOREIGN KEY (id_picture) REFERENCES picture(id_picture) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: fk_picture_comein_sketch; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY picture
+    ADD CONSTRAINT fk_picture_comein_sketch FOREIGN KEY (id_sketch) REFERENCES sketch(id_sketch) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: fk_statemen_distribut_ordering; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY statement
+    ADD CONSTRAINT fk_statemen_distribut_ordering FOREIGN KEY (number_ordering) REFERENCES ordering(number_ordering) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: fk_statemen_realizes_performe; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY statement
+    ADD CONSTRAINT fk_statemen_realizes_performe FOREIGN KEY (id_performer) REFERENCES performer(id_performer) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: fk_statemen_turning_picture; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY statement
+    ADD CONSTRAINT fk_statemen_turning_picture FOREIGN KEY (id_picture) REFERENCES picture(id_picture) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+--
+-- Name: public; Type: ACL; Schema: -; Owner: postgres
+--
+
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+REVOKE ALL ON SCHEMA public FROM postgres;
+GRANT ALL ON SCHEMA public TO postgres;
+GRANT ALL ON SCHEMA public TO PUBLIC;
+
+
+--
+-- PostgreSQL database dump complete
+--
+
